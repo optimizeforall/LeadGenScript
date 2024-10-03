@@ -1,0 +1,76 @@
+walgreens
+target
+walmart
+cvs
+home depot
+lowe's
+starbucks
+mcdonald's
+burger king
+subway
+kfc
+pizza hut
+domino's
+dunkin' donuts
+taco bell
+chick-fil-a
+7-eleven
+costco
+sam's club
+best buy
+office depot
+staples
+petsmart
+petco
+ikea
+ace hardware
+menards
+trader joe's
+aldi
+big lots
+dollar tree
+dollar general
+kroger
+publix
+safeway
+whole foods
+tj maxx
+marshalls
+ross
+bed bath & beyond
+michaels
+hobby lobby
+joann fabrics
+barnes & noble
+gamestop
+autozone
+o'reilly auto parts
+advance auto parts
+foot locker
+dick's sporting goods
+academy sports + outdoors
+ulta beauty
+sephora
+bath & body works
+victoria's secret
+old navy
+gap
+h&m
+forever 21
+american eagle
+hollister
+abercrombie & fitch
+aeropostale
+express
+rue21
+five below
+family dollar
+kohl's
+jcpenney
+macy's
+nordstrom
+saks fifth avenue
+bloomingdale's
+neiman marcus
+dillard's
+belk
