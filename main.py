@@ -6,6 +6,7 @@ import concurrent.futures
 import sys
 from datetime import datetime
 from colorama import Fore, Style, init
+from geopy.geocoders import Nominatim
 
 # API key for Google Places API (replace with your own)
 API_KEY = 'AIzaSyA-YMXLi1Er6R_-iL1VncrDUyPa3erKEU4'
@@ -14,6 +15,22 @@ API_KEY = 'AIzaSyA-YMXLi1Er6R_-iL1VncrDUyPa3erKEU4'
 BUSINESS_TYPE = "Lighting and Holiday"
 MAX_RETRIES = 3
 BACKOFF_TIME = 2
+
+def get_location_coordinates(location):
+    geolocator = Nominatim(user_agent="my_app")
+    try:
+        location_data = geolocator.geocode(location)
+        if location_data:
+            return f"{location_data.latitude},{location_data.longitude}"
+    except Exception as e:
+        print(f"Error getting coordinates for {location}: {str(e)}")
+    return None
+
+def get_phone_number(place_id):
+    url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={place_id}&fields=formatted_phone_number&key={API_KEY}"
+    response = requests.get(url)
+    result = response.json().get('result', {})
+    return result.get('formatted_phone_number')
 
 def search_businesses(location):
     """
@@ -24,8 +41,10 @@ def search_businesses(location):
     
     Returns:
     list: List of dictionaries containing business information
+    int: Number of skipped businesses
     """
     businesses = []
+    skipped_businesses = 0
     next_page_token = None
     page_count = 0
     query = f"{BUSINESS_TYPE}"
@@ -49,7 +68,7 @@ def search_businesses(location):
             except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
                 if attempt == MAX_RETRIES - 1:
                     print(f"\nError searching {location}: {str(e)}")
-                    return businesses
+                    return businesses, skipped_businesses
                 time.sleep(BACKOFF_TIME * (attempt + 1))
         
         if 'error_message' in results:
@@ -57,46 +76,46 @@ def search_businesses(location):
             break
         
         for result in results['results']:
-            business = {
-                'NAME': result['name'],
-                'ADDRESS': result.get('formatted_address', 'N/A'),
-                'RATING': result.get('rating', 'N/A'),
-                'PHONE': 'N/A',
-                'WEBSITE': 'N/A',
-                'CITY': location.split(',')[0].strip(),
-                'STATE': location.split(',')[1].strip(),
-                'REVIEWS': result.get('user_ratings_total', 'N/A')
-            }
-            
-            # Get additional details (phone and website) using Place Details API
-            place_id = result['place_id']
-            details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={place_id}&fields=formatted_phone_number,website&key={API_KEY}"
-            
-            for attempt in range(MAX_RETRIES):
-                try:
-                    details_response = requests.get(details_url, timeout=10)
-                    details_response.raise_for_status()
-                    details_results = details_response.json()
-                    break
-                except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-                    if attempt == MAX_RETRIES - 1:
-                        print(f"\nError getting details for {business['NAME']} in {location}: {str(e)}")
+            phone_number = get_phone_number(result.get('place_id'))
+            if phone_number:
+                business = {
+                    'NAME': result['name'],
+                    'PHONE': phone_number,
+                    'WEBSITE': 'N/A',
+                    'CITY/STATE': f"{location.split(',')[0].strip()}, {location.split(',')[1].strip()}",
+                    'RATING': result.get('rating', 'N/A'),
+                    'REVIEWS': result.get('user_ratings_total', 'N/A')
+                }
+                
+                # Get additional details (website) using Place Details API
+                place_id = result['place_id']
+                details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={place_id}&fields=website&key={API_KEY}"
+                
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        details_response = requests.get(details_url, timeout=10)
+                        details_response.raise_for_status()
+                        details_results = details_response.json()
                         break
-                    time.sleep(BACKOFF_TIME * (attempt + 1))
-            
-            if 'result' in details_results:
-                business['PHONE'] = details_results['result'].get('formatted_phone_number', 'N/A')
-                business['WEBSITE'] = details_results['result'].get('website', 'N/A')
-            
-            businesses.append(business)
+                    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+                        if attempt == MAX_RETRIES - 1:
+                            print(f"\nError getting details for {business['NAME']} in {location}: {str(e)}")
+                            break
+                        time.sleep(BACKOFF_TIME * (attempt + 1))
+                if 'result' in details_results:
+                    business['WEBSITE'] = details_results['result'].get('website', 'N/A')
+                
+                businesses.append(business)
+            else:
+                skipped_businesses += 1
         
         next_page_token = results.get('next_page_token')
         if not next_page_token:
             break
         
-        time.sleep(2)  # Wait before making the next request (API restriction)
+        time.sleep(2)  # Delay to avoid hitting API rate limits
     
-    return businesses
+    return businesses, skipped_businesses
 
 def save_to_csv(businesses, filename):
     """
@@ -107,7 +126,7 @@ def save_to_csv(businesses, filename):
     filename (str): Name of the file to save the data to
     """
     with open(filename, 'w', newline='', encoding='utf-8') as file:
-        writer = csv.DictWriter(file, fieldnames=['NAME', 'ADDRESS', 'RATING', 'PHONE', 'WEBSITE', 'CITY', 'STATE', 'REVIEWS'])
+        writer = csv.DictWriter(file, fieldnames=['NAME', 'PHONE', 'WEBSITE', 'CITY/STATE', 'RATING', 'REVIEWS'])
         writer.writeheader()
         writer.writerows(businesses)
 
@@ -120,9 +139,6 @@ def main():
 
     major_cities = [
         "New York, NY", "Los Angeles, CA", "Chicago, IL", "Houston, TX", "Phoenix, AZ",
-        "Philadelphia, PA", "San Antonio, TX", "San Diego, CA", "Dallas, TX", "San Jose, CA",
-        "Austin, TX", "Jacksonville, FL", "Fort Worth, TX", "Columbus, OH", "San Francisco, CA",
-        "Charlotte, NC", "Indianapolis, IN", "Seattle, WA", "Denver, CO", "Washington, DC"
     ]
 
     all_businesses = []
@@ -138,13 +154,13 @@ def main():
         for future in concurrent.futures.as_completed(future_to_city):
             city = future_to_city[future]
             try:
-                businesses = future.result()
+                businesses, skipped_businesses = future.result()
                 all_businesses.extend(businesses)
                 runtime = datetime.now() - start_time
                 completed_cities += 1
                 
                 businesses_with_numbers = [b for b in businesses if b['PHONE'] != 'N/A']
-                businesses_without_numbers += len(businesses) - len(businesses_with_numbers)
+                businesses_without_numbers += skipped_businesses
                 
                 avg_rating = sum(float(b['RATING']) for b in businesses_with_numbers if b['RATING'] != 'N/A') / len(businesses_with_numbers) if businesses_with_numbers else 0
                 total_reviews = sum(int(b['REVIEWS']) for b in businesses_with_numbers if b['REVIEWS'] != 'N/A')
