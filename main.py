@@ -4,12 +4,33 @@ import csv
 import time
 import concurrent.futures
 import sys
+import os
 from datetime import datetime
 from colorama import Fore, Style, init
 from geopy.geocoders import Nominatim
+import us
+from urllib.request import urlopen
+from io import StringIO
+import argparse
+from geonamescache import GeonamesCache
+from geonamescache.mappers import country
+from threading import local
+import logging
 
-# API key for Google Places API (replace with your own)
-API_KEY = 'AIzaSyA-YMXLi1Er6R_-iL1VncrDUyPa3erKEU4'
+# Initialize thread-local storage for sessions
+thread_local = local()
+
+def get_session():
+    if not hasattr(thread_local, "session"):
+        thread_local.session = requests.Session()
+    return thread_local.session
+
+# API key for Google Places API (imported from environment variable)
+API_KEY = os.environ.get('GOOGLE_PLACES_API_KEY')
+
+if not API_KEY:
+    print("Error: GOOGLE_PLACES_API_KEY environment variable is not set.")
+    sys.exit(1)
 
 # Constants
 BUSINESS_TYPE = "Lighting and Holiday"
@@ -32,22 +53,24 @@ def get_phone_number(place_id):
     result = response.json().get('result', {})
     return result.get('formatted_phone_number')
 
-def search_businesses(location):
+def search_businesses(location, business_type):
     """
     Search for businesses using Google Places API.
     
     Args:
     location (str): Location to search in
+    business_type (str): Type of business to search for
     
     Returns:
     list: List of dictionaries containing business information
     int: Number of skipped businesses
     """
+    session = get_session()
     businesses = []
     skipped_businesses = 0
     next_page_token = None
     page_count = 0
-    query = f"{BUSINESS_TYPE}"
+    query = f"{business_type}"
     
     while True:
         page_count += 1
@@ -61,7 +84,7 @@ def search_businesses(location):
         # Make the API request with retries
         for attempt in range(MAX_RETRIES):
             try:
-                response = requests.get(url, timeout=10)
+                response = session.get(url, timeout=10)
                 response.raise_for_status()
                 results = response.json()
                 break
@@ -93,7 +116,7 @@ def search_businesses(location):
                 
                 for attempt in range(MAX_RETRIES):
                     try:
-                        details_response = requests.get(details_url, timeout=10)
+                        details_response = session.get(details_url, timeout=10)
                         details_response.raise_for_status()
                         details_results = details_response.json()
                         break
@@ -130,16 +153,91 @@ def save_to_csv(businesses, filename):
         writer.writeheader()
         writer.writerows(businesses)
 
+def get_cities_by_state(state_input=None, all_states=False, everything=False, min_population=10000):
+    """
+    Generate a dictionary of cities grouped by state using the geonamescache library.
+    
+    Args:
+        state_input (str): The state abbreviation or full name to search for cities.
+        all_states (bool): If True, include only the capital city of each state.
+        everything (bool): If True, include all cities for all states.
+        min_population (int): Minimum population for a city to be included.
+    
+    Returns:
+        dict: Dictionary with states as keys and lists of "City, State" as values.
+    """
+    gc = GeonamesCache()
+    us_cities = gc.get_cities()
+    
+    def get_state_from_input(input_str):
+        if input_str:
+            state = us.states.lookup(input_str)
+            if not state:
+                state = next((s for s in us.states.STATES if s.name.lower() == input_str.lower()), None)
+            return state
+        return None
+    
+    def get_cities_for_state(state, us_cities, min_population):
+        cities = []
+        # Get the capital city for the state
+        capital_city = f"{state.capital}, {state.abbr}"
+        cities.append(capital_city)
+        return cities
+    
+    if everything:
+        states_dict = {}
+        for state in us.states.STATES:
+            if not state.is_territory:
+                cities = get_cities_for_state(state, us_cities, min_population)
+                states_dict[state.abbr] = cities
+        return states_dict
+    elif all_states:
+        # Include only the capital city per state
+        states_dict = {}
+        for state in us.states.STATES:
+            if not state.is_territory:
+                cities = get_cities_for_state(state, us_cities, min_population)
+                states_dict[state.abbr] = cities
+        return states_dict
+    elif state_input:
+        state = get_state_from_input(state_input)
+        if not state:
+            raise ValueError(f"Invalid state input: {state_input}")
+        
+        # Get the capital city for the specified state
+        cities = get_cities_for_state(state, us_cities, min_population)
+        
+        print(f"Cities found for {state.name} ({state.abbr}): {cities}")
+
+        return {state.abbr: cities}  # Return the capital city for the state
+    else:
+        # Default to all major cities if no specific input is provided
+        return get_cities_by_state(all_states=True)
+
 def main():
     """
     Main function to run the business search and data saving process.
     """
+    parser = argparse.ArgumentParser(description="Search for businesses in US states.")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--all-states", action="store_true", help="Search in one major city per all 50 states")
+    group.add_argument("--everything", action="store_true", help="Search in all cities of all states")
+    parser.add_argument("--state", help="Two-letter state abbreviation to search for cities")
+    parser.add_argument("business_type", nargs="?", default="Lighting and Holiday", help="Type of business to search for")
+    args = parser.parse_args()
+
+    # Configure logging for better performance and debugging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
     init(autoreset=True)  # Initialize colorama
     start_time = datetime.now()
 
-    major_cities = [
-        "New York, NY", "Los Angeles, CA", "Chicago, IL", "Houston, TX", "Phoenix, AZ",
-    ]
+    # Get cities grouped by state based on arguments
+    try:
+        cities_by_state = get_cities_by_state(args.state, args.all_states, args.everything)
+    except ValueError as ve:
+        logging.error(str(ve))
+        sys.exit(1)
 
     all_businesses = []
     businesses_without_numbers = 0
@@ -148,8 +246,15 @@ def main():
     print(f"{Style.BRIGHT}{Fore.CYAN}{'-'*80}")
 
     completed_cities = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_city = {executor.submit(search_businesses, city): city for city in major_cities}
+    total_cities = sum(len(cities) for cities in cities_by_state.values())
+
+    # Optimize ThreadPoolExecutor by increasing max_workers
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        future_to_city = {}
+        for state, cities in cities_by_state.items():
+            for city in cities:
+                future = executor.submit(search_businesses, city, args.business_type)
+                future_to_city[future] = city
         
         for future in concurrent.futures.as_completed(future_to_city):
             city = future_to_city[future]
@@ -172,12 +277,12 @@ def main():
                 else:
                     color = Fore.RED
                 
-                print(f"{color}{city:<20} {len(businesses_with_numbers):<8} {avg_rating:.2f}        {total_reviews:<15} {str(runtime):<15} {completed_cities}/{len(major_cities)}")
+                print(f"{color}{city:<20} {len(businesses_with_numbers):<8} {avg_rating:.2f}        {total_reviews:<15} {str(runtime):<15} {completed_cities}/{total_cities}")
             except Exception as exc:
-                print(f"{Fore.RED}{city:<20} {'ERROR':<8} {'N/A':<12} {'N/A':<15} {str(runtime):<15} {completed_cities}/{len(major_cities)}")
+                print(f"{Fore.RED}{city:<20} {'ERROR':<8} {'N/A':<12} {'N/A':<15} {str(runtime):<15} {completed_cities}/{total_cities}")
                 print(f"Error details: {str(exc)}")
 
-    filename = f"leads_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    filename = f"leads_{args.business_type.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     save_to_csv(all_businesses, filename)
     
     total_runtime = datetime.now() - start_time
