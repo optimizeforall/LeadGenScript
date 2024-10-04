@@ -241,22 +241,30 @@ def get_cities_by_state(state_input=None, all_states=False, everything=False, mi
     else:
         return get_cities_by_state(all_states=True)
 
-def generate_enhanced_query(original_query):
+def generate_enhanced_query_and_keywords(original_query):
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",  # Using the specified model
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant that generates targeted search queries for homeowner services using the Google Places API."},
-            {"role": "user", "content": f"Generate a specific, targeted search query for homeowner services related to: '{original_query}'. The query should be 3-4 words long and aimed at improving search results within the bounds of the Places API. Respond only with the enhanced query."}
-        ]
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that generates targeted search queries and keywords for homeowner services using the Google Places API."},
+                {"role": "user", "content": f"For the business type '{original_query}', please provide:\n1. A specific, targeted search query of 3-4 words aimed at improving search results within the bounds of the Places API.\n2. A list of 10 single-word keywords that we can expect to find in the name or title of businesses related to this query. Include words from the original query and extend beyond them. Each keyword must be a single word.\n\nRespond in the following format:\nQuery: [Your 3-4 word query]\nKeywords: [comma-separated list of 10 single-word keywords]"}
+            ]
         )
-        enhanced_query = response.choices[0].message.content.strip()
+        result = response.choices[0].message.content.strip().split('\n')
+        enhanced_query = result[0].split(': ')[1].strip()
+        keywords = result[1].split(': ')[1].strip().split(', ')
         
+        # Ensure each word in the enhanced query is in keywords
+        keywords.extend(word for word in enhanced_query.split() if word not in keywords)
+
+        keywords = [word.split()[0] for word in keywords]
+
+        # Ensure each word in the enhanced query is 
         
-        return enhanced_query
+        return enhanced_query, keywords
     except Exception as e:
-        print(f"Error generating enhanced query: {str(e)}")
-        return original_query
+        print(f"Error generating enhanced query and keywords: {str(e)}")
+        return original_query, []
 
 # Add this function at the beginning of your file
 def print_legend():
@@ -325,8 +333,9 @@ def main():
 
     # Generate the enhanced query using GPT-4 Mini
     print(f"\n{Style.BRIGHT}{Fore.MAGENTA}Original Search Query: {args.business_type}")
-    enhanced_query = generate_enhanced_query(args.business_type)
+    enhanced_query, keywords = generate_enhanced_query_and_keywords(args.business_type)
     print(f"{Style.BRIGHT}{Fore.MAGENTA}Enhanced Search Query: {enhanced_query}")
+    print(f"{Style.BRIGHT}{Fore.MAGENTA}Keywords: {', '.join(keywords)}")
 
     print(f"\n{Style.BRIGHT}{Fore.CYAN}{'City, State':<20} {'Leads':<8} {'Avg Rating':<12} {'Total Reviews':<15} {'Runtime':<15} {'Progress'}")
     print(f"{Style.BRIGHT}{Fore.CYAN}{'-'*80}")
