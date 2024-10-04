@@ -1,6 +1,6 @@
-# Business Search Tool
+# LeadGen: Lead Generation Tool
 
-A powerful Python tool to search for businesses across US states, leveraging the Google Places API and OpenAI for enhanced query generation.
+A powerful Python tool to search for businesses across US states, leveraging the Google Places API and OpenAI for enhanced query generation.o
 
 ![Shell Command](imgs/img0.png)
 *Figure 1: Example shell command and initial output.*

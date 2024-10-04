@@ -101,13 +101,16 @@ async def get_place_details(session, place_id):
         details = result.get('result', {})
         return details.get('formatted_phone_number'), details.get('website')
 
-# Add this function near the top of the file, after the imports
-def is_duplicate(business, existing_businesses):
-    return any(
-        b['NAME'].lower() == business['NAME'].lower() and
-        b['STATE/CITY'].lower() == business['STATE/CITY'].lower()
-        for b in existing_businesses
-    )
+# Initialize a set to track unique businesses based on (name, phone)
+unique_businesses = set()
+
+# Update the is_duplicate function
+def is_duplicate(business):
+    identifier = (business['NAME'].strip().lower(), business['PHONE'].strip())
+    if identifier in unique_businesses:
+        return True
+    unique_businesses.add(identifier)
+    return False
 
 # Update the search_businesses function
 async def search_businesses(session, location, business_type, enhanced_query, keywords):
@@ -143,7 +146,7 @@ async def search_businesses(session, location, business_type, enhanced_query, ke
                 'REASON': ''
             }
             
-            if is_duplicate(business, businesses):
+            if is_duplicate(business):
                 business['REASON'] = 'duplicate'
                 bad_leads.append(business)
                 duplicates += 1
@@ -309,6 +312,16 @@ def ensure_directory(directory):
     if not os.path.exists(directory):
         os.makedirs(directory)
 
+def deduplicate_businesses(businesses):
+    deduped = []
+    seen = set()
+    for business in businesses:
+        identifier = (business['NAME'].strip().lower(), business['PHONE'].strip())
+        if identifier not in seen:
+            deduped.append(business)
+            seen.add(identifier)
+    return deduped
+
 async def main_async():
     """
     Main function to run the business search and data saving process.
@@ -390,10 +403,16 @@ async def main_async():
 
     print("\nProcessing completed. Preparing final results...")
 
-    # Move the calculation here
+    # Replace the existing counts with deduplicated counts
+    # Deduplicate the businesses
+    all_businesses = deduplicate_businesses(all_businesses)
+    all_bad_leads = deduplicate_businesses(all_bad_leads)
+
+    # Recalculate counts based on deduplicated data
     didnt_match_keywords = sum(1 for lead in all_bad_leads if lead.get('REASON') == "no_keyword")
     total_duplicates = sum(1 for lead in all_bad_leads if lead.get('REASON') == "duplicate")
     no_phone_number = sum(1 for lead in all_bad_leads if lead.get('REASON') == "no_number")
+    total_leads = len(all_businesses) + len(all_bad_leads)
 
     try:
         # Create the ../leads directory if it doesn't exist
