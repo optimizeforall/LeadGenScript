@@ -1,9 +1,14 @@
-# This file will handle data input/output operations
+import csv
 
-def read_input_data(file_path):
-    # Implement function to read input data
-    pass
+def save_to_csv(data, filename):
+    with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+        if data:  # Check if data is not empty
+            writer = csv.DictWriter(csvfile, fieldnames=data[0].keys())
+            writer.writeheader()
+            for row in data:
+                writer.writerow(row)
+    
+    print(f"Data saved to {filename}")
 
-def write_output_data(data, file_path):
-    # Implement function to write output data
-    pass
+# Add this line to make the function available for import
+__all__ = ['save_to_csv']

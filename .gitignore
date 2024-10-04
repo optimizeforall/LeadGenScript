@@ -122,3 +122,6 @@ ENV/
 
 # mypy
 .mypy_cache/
+.aider*
+__pycache__/
+__pycache__/
