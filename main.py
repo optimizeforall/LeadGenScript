@@ -161,11 +161,12 @@ def get_cities_by_state(state_input=None, all_states=False, everything=False, mi
         state_input (str): The state abbreviation or full name to search for cities.
         all_states (bool): If True, include only the capital city of each state.
         everything (bool): If True, include all cities for all states.
-        min_population (int): Minimum population for a city to be included.
+        min_population (int): Minimum populatioon for a city to be included.
     
     Returns:
         dict: Dictionary with states as keys and lists of "City, State" as values.
     """
+    
     gc = GeonamesCache()
     us_cities = gc.get_cities()
     
@@ -218,6 +219,7 @@ def main():
     """
     Main function to run the business search and data saving process.
     """
+
     parser = argparse.ArgumentParser(description="Search for businesses in US states.")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--all-states", action="store_true", help="Search in one major city per all 50 states")
@@ -231,6 +233,11 @@ def main():
     
     init(autoreset=True)  # Initialize colorama
     start_time = datetime.now()
+
+    # Add the new print statements for the search queries
+    print(f"\n{Style.BRIGHT}{Fore.MAGENTA}Original Search Query: {args.business_type}")
+    enhanced_query = f"{args.business_type} services"  # Example of an enhanced query
+    print(f"{Style.BRIGHT}{Fore.MAGENTA}Enhanced Search Query: {enhanced_query}")
 
     # Get cities grouped by state based on arguments
     try:
