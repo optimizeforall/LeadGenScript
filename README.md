@@ -1,55 +1,60 @@
 # Business Lead Generator
 
 ## Description
-This Python-based tool efficiently searches for businesses across U.S. cities and states using the Google Places API. It's designed to generate leads for various business types, with customizable search options and optimized performance.
+This Python tool searches for businesses across U.S. cities using the Google Places API. It's designed to generate leads for various business types, making it useful for sales and marketing professionals.
 
-## Features
-- Search for businesses in capital cities of all states
-- Search in major cities across all states
-- Search within a specific state
-- Concurrent API requests for faster processing
-- CSV output of business leads including name, phone, website, location, rating, and review count
+## Prerequisites
+- Python 3.7 or higher
+- A Google Places API key
 
-## Installation
+## Setup
 1. Clone the repository:
    ```
    git clone https://github.com/yourusername/business-lead-generator.git
-   ```
-2. Navigate to the project directory:
-   ```
    cd business-lead-generator
    ```
-3. Make the script executable:
+
+2. Install required packages:
    ```
-   chmod +x main.py
+   pip install -r requirements.txt
    ```
-4. Set up your Google Places API key as an environment variable:
-   ```
-   export GOOGLE_PLACES_API_KEY='your_api_key_here'
-   ```
+
+3. Set up your Google Places API key:
+   - Create a file named `.env` in the project root
+   - Add the following line to the file:
+     ```
+     GOOGLE_PLACES_API_KEY=your_api_key_here
+     ```
+   Replace `your_api_key_here` with your actual Google Places API key.
 
 ## Usage
-Run the script with one of the following options:
+Run the script using one of these commands:
 
-1. Search in capital cities of all states:
+1. Search in all states:
    ```
-   ./main.py --all-states "Business Type"
-   ```
-
-2. Search in major cities across all states:
-   ```
-   ./main.py --everything "Business Type"
+   python main.py --all-states "Business Type"
    ```
 
-3. Search within a specific state:
+2. Search in a specific state:
    ```
-   ./main.py --state NY "Business Type"
+   python main.py --state NY "Business Type"
    ```
 
 Replace "Business Type" with your target business category (e.g., "Roofing", "Plumbing").
 
 ## Output
-The script generates a CSV file named `leads_[BusinessType]_[Timestamp].csv` containing the collected business information.
+The script generates two CSV files:
+- `leads.csv`: Contains valid business leads
+- `bad-leads.csv`: Contains invalid or duplicate leads
 
-## Note
-Ensure compliance with Google Places API terms of service and respect rate limits to avoid service interruptions.
+## Notes
+- Ensure you have sufficient API quota before running large searches.
+- Respect Google's terms of service and API usage limits.
+
+## Troubleshooting
+If you encounter any issues, check the following:
+- Ensure your API key is correctly set in the `.env` file
+- Verify that all required packages are installed
+- Check your internet connection
+
+For more detailed error messages, run the script with the `--debug` flag:

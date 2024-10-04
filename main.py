@@ -6,7 +6,7 @@ import concurrent.futures
 import sys
 import os
 from datetime import datetime
-from colorama import Fore, Style, init
+from colorama import Fore, Back, Style, init
 from geopy.geocoders import Nominatim
 import us
 from urllib.request import urlopen
@@ -18,8 +18,17 @@ from threading import local
 import logging
 from openai import OpenAI
 import threading
+import asyncio
+import aiohttp
+from config import (
+    GOOGLE_PLACES_API_KEY,
+    OPENAI_API_KEY,
+    BUSINESS_TYPE,
+    MAX_RETRIES,
+    BACKOFF_TIME
+)
 
-client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Initialize thread-local storage for sessions
 thread_local = local()
@@ -30,30 +39,46 @@ def get_session():
     return thread_local.session
 
 # API key for Google Places API (imported from environment variable)
-API_KEY = os.environ.get('GOOGLE_PLACES_API_KEY')
+API_KEY = GOOGLE_PLACES_API_KEY
 
 if not API_KEY:
     print("Error: GOOGLE_PLACES_API_KEY environment variable is not set.")
     sys.exit(1)
 
-# Constants
-BUSINESS_TYPE = "Lighting and Holiday"
-MAX_RETRIES = 3
-BACKOFF_TIME = 2
-
-# Near the top of the file, after the other imports
-
-if not os.environ.get('OPENAI_API_KEY'):
+if not OPENAI_API_KEY:
     print("Error: OPENAI_API_KEY environment variable is not set.")
     sys.exit(1)
 
-parser = argparse.ArgumentParser()
+parser = argparse.ArgumentParser(description="Search for businesses in US states.")
+parser.add_argument("--all-states", action="store_true", help="Search in major cities of all states")
+parser.add_argument("--state", help="Two-letter state abbreviation to search for cities")
+parser.add_argument("-n", "--number", type=int, default=100, help="Number of cities to process (default: 100)")
+parser.add_argument("business_type", nargs="?", default="Lighting and Holiday", help="Type of business to search for")
 parser.add_argument('--debug', action='store_true', help='Enable debug mode')
 args = parser.parse_args()
 
+# Initialize colorama
+init(autoreset=True)
+
 # Replace the existing logging configuration with this
 if args.debug:
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+    class ColoredFormatter(logging.Formatter):
+        COLORS = {
+            'DEBUG': Fore.CYAN,
+            'INFO': Fore.GREEN,
+            'WARNING': Fore.YELLOW,
+            'ERROR': Fore.RED,
+            'CRITICAL': Fore.RED + Back.WHITE
+        }
+
+        def format(self, record):
+            color = self.COLORS.get(record.levelname, '')
+            message = super().format(record)
+            return f"{color}{message}{Style.RESET_ALL}"
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(ColoredFormatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logging.basicConfig(level=logging.DEBUG, handlers=[handler])
 else:
     logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -67,128 +92,109 @@ def get_location_coordinates(location):
         print(f"Error getting coordinates for {location}: {str(e)}")
     return None
 
-def get_phone_number(place_id):
+async def get_phone_number(session, place_id):
     url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={place_id}&fields=formatted_phone_number&key={API_KEY}"
-    response = requests.get(url)
-    result = response.json().get('result', {})
-    return result.get('formatted_phone_number')
+    async with session.get(url) as response:
+        result = await response.json()
+        return result.get('result', {}).get('formatted_phone_number')
 
-def search_businesses(location, business_type, enhanced_query):
-    """
-    Search for businesses using Google Places API.
-    
-    Args:
-    location (str): Location to search in
-    business_type (str): Type of business to search for
-    
-    Returns:
-    list: List of dictionaries containing business information
-    int: Number of skipped businesses
-    """
-    session = get_session()
+# Add this function near the top of the file, after the imports
+def is_duplicate(business, existing_businesses):
+    return any(
+        b['NAME'].lower() == business['NAME'].lower() and
+        b['CITY/STATE'].lower() == business['CITY/STATE'].lower()
+        for b in existing_businesses
+    )
+
+# Update the search_businesses function
+async def search_businesses(session, location, business_type, enhanced_query, keywords):
     businesses = []
+    bad_leads = []
     skipped_businesses = 0
-    next_page_token = None
-    page_count = 0
-    query = enhanced_query if enhanced_query else business_type
+    duplicates = 0
+    url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={enhanced_query}+in+{location}&key={API_KEY}"
 
-    while True:
-        page_count += 1
+    async with session.get(url) as response:
+        results = await response.json()
 
-        # Construct the URL for the Places API text search
-        url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={query}+in+{location}&key={API_KEY}"
+    if 'error_message' in results:
+        print(f"\nAPI Error for {location}: {results['error_message']}")
+        return businesses, bad_leads, skipped_businesses, duplicates
 
-        if next_page_token:
-            url += f"&pagetoken={next_page_token}"
+    total_results = len(results.get('results', []))
+    valid_leads = 0
+    invalid_leads = 0
 
-        # Make the API request with retries
-        for attempt in range(MAX_RETRIES):
-            try:
-                response = session.get(url, timeout=10)
-                response.raise_for_status()
-                results = response.json()
-                break
-            except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-                if attempt == MAX_RETRIES - 1:
-                    print(f"\nError searching {location}: {str(e)}")
-                    return businesses, skipped_businesses
-                time.sleep(BACKOFF_TIME * (attempt + 1))
-
-        if 'error_message' in results:
-            print(f"\nAPI Error for {location}: {results['error_message']}")
-            break
-
-        for result in results['results']:
-            phone_number = get_phone_number(result.get('place_id'))
-            if phone_number:
-                business = {
-                    'NAME': result['name'],
-                    'PHONE': phone_number,
-                    'WEBSITE': 'N/A',
-                    'CITY/STATE': f"{location.split(',')[0].strip()}, {location.split(',')[1].strip()}",
-                    'RATING': result.get('rating', 'N/A'),
-                    'REVIEWS': result.get('user_ratings_total', 'N/A')
-                }
-
-                # Get additional details (website) using Place Details API
-                place_id = result['place_id']
-                details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={place_id}&fields=website&key={API_KEY}"
-
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        details_response = session.get(details_url, timeout=10)
-                        details_response.raise_for_status()
-                        details_results = details_response.json()
-                        break
-                    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-                        if attempt == MAX_RETRIES - 1:
-                            print(f"\nError getting details for {business['NAME']} in {location}: {str(e)}")
-                            break
-                        time.sleep(BACKOFF_TIME * (attempt + 1))
-                if 'result' in details_results:
-                    business['WEBSITE'] = details_results['result'].get('website', 'N/A')
-
-                businesses.append(business)
-            else:
+    for result in results.get('results', []):
+        business_name = result['name'].lower()
+        if any(keyword.lower() in business_name for keyword in keywords):
+            phone_number = await get_phone_number(session, result.get('place_id'))
+            business = {
+                'NAME': result['name'],
+                'PHONE': phone_number if phone_number else 'N/A',
+                'WEBSITE': result.get('website', 'N/A'),
+                'CITY/STATE': f"{location.split(',')[0].strip()}, {location.split(',')[1].strip()}",
+                'RATING': result.get('rating', 'N/A'),
+                'REVIEWS': result.get('user_ratings_total', 'N/A'),
+                'REASON': ''
+            }
+            
+            if is_duplicate(business, businesses):
+                business['REASON'] = 'duplicate'
+                bad_leads.append(business)
+                duplicates += 1
+                invalid_leads += 1
+            elif not phone_number:
+                business['REASON'] = 'no_number'
+                bad_leads.append(business)
                 skipped_businesses += 1
+                invalid_leads += 1
+            else:
+                businesses.append(business)
+                valid_leads += 1
+        else:
+            bad_lead = {
+                'NAME': result['name'],
+                'PHONE': 'N/A',
+                'WEBSITE': 'N/A',
+                'CITY/STATE': f"{location.split(',')[0].strip()}, {location.split(',')[1].strip()}",
+                'RATING': result.get('rating', 'N/A'),
+                'REVIEWS': result.get('user_ratings_total', 'N/A'),
+                'REASON': 'no_keyword'
+            }
+            bad_leads.append(bad_lead)
+            invalid_leads += 1
 
-        next_page_token = results.get('next_page_token')
-        if not next_page_token:
-            break
+    logging.debug(f"{Fore.MAGENTA}Location: {location}{Style.RESET_ALL}")
+    logging.debug(f"{Fore.CYAN}Total results: {total_results}{Style.RESET_ALL}")
+    logging.debug(f"{Fore.GREEN}Valid leads: {valid_leads}{Style.RESET_ALL}")
+    logging.debug(f"{Fore.RED}Invalid leads: {invalid_leads}{Style.RESET_ALL}")
+    logging.debug(f"{Fore.YELLOW}Duplicates: {duplicates}{Style.RESET_ALL}")
 
-        time.sleep(2)  # Delay to avoid hitting API rate limits
+    return businesses, bad_leads, skipped_businesses, invalid_leads, duplicates
 
-    return businesses, skipped_businesses
+# Update the process_city function
+async def process_city(session, city, business_type, enhanced_query, keywords):
+    start_time_city = time.time()
+    businesses, bad_leads, skipped_businesses, invalid_leads, duplicates = await search_businesses(session, city, business_type, enhanced_query, keywords)
+    logging.debug(f"Time taken for {city}: {time.time() - start_time_city:.2f} seconds")
+    return city, businesses, bad_leads, skipped_businesses, invalid_leads, duplicates
 
+# Update the save_to_csv function
 def save_to_csv(businesses, filename):
-    """
-    Save the list of businesses to a CSV file.
-    
-    Args:
-    businesses (list): List of dictionaries containing business information
-    filename (str): Name of the file to save the data to
-    """
     with open(filename, 'w', newline='', encoding='utf-8') as file:
-        writer = csv.DictWriter(file, fieldnames=['NAME', 'PHONE', 'WEBSITE', 'CITY/STATE', 'RATING', 'REVIEWS'])
+        writer = csv.DictWriter(file, fieldnames=['NAME', 'PHONE', 'WEBSITE', 'CITY/STATE', 'RATING', 'REVIEWS', 'REASON'])
         writer.writeheader()
         writer.writerows(businesses)
 
-def get_cities_by_state(state_input=None, all_states=False, everything=False, min_population=10000):
-    """
-    Generate a dictionary of cities grouped by state using the geonamescache library.
+def get_cities_by_state(state_input=None, all_states=False, num_cities=100, min_population=10000):
+    logging.debug(f"Starting get_cities_by_state with state_input={state_input}, all_states={all_states}, num_cities={num_cities}")
+    start_time = time.time()
     
-    Args:
-        state_input (str): The state abbreviation or full name to search for cities.
-        all_states (bool): If True, include only the capital city of each state.
-        everything (bool): If True, include all cities for all states.
-        min_population (int): Minimum populatioon for a city to be included.
-    
-    Returns:
-        dict: Dictionary with states as keys and lists of "City, State" as values.
-    """
-
     gc = GeonamesCache()
     us_cities = gc.get_cities()
+    
+    logging.debug(f"Loaded GeonamesCache in {time.time() - start_time:.2f} seconds")
 
     def get_state_from_input(input_str):
         if input_str:
@@ -198,56 +204,57 @@ def get_cities_by_state(state_input=None, all_states=False, everything=False, mi
             return state
         return None
 
-    def get_cities_for_state(state, us_cities, min_population):
+    def get_cities_for_state(state, us_cities, min_population, num_cities):
         cities = []
         for geoname_id, city_info in us_cities.items():
             if city_info['countrycode'] == 'US' and city_info['admin1code'] == state.abbr:
                 if city_info['population'] >= min_population:
                     city_name = f"{city_info['name']}, {state.abbr}"
-                    cities.append(city_name)
-
-        # Ensure the capital city is included
+                    cities.append((city_name, city_info['population']))
+        
+        cities.sort(key=lambda x: x[1], reverse=True)
+        top_cities = [city[0] for city in cities[:num_cities]]
+        
         capital_city = f"{state.capital}, {state.abbr}"
-        if capital_city not in cities:
-            cities.append(capital_city)
+        if capital_city not in top_cities:
+            top_cities.insert(0, capital_city)
+        
+        return top_cities[:num_cities]
 
-        return cities
-
-    if everything:
+    if all_states:
         states_dict = {}
         for state in us.states.STATES:
             if not state.is_territory:
-                cities = get_cities_for_state(state, us_cities, min_population)
+                cities = get_cities_for_state(state, us_cities, min_population, num_cities)
                 states_dict[state.abbr] = cities
-        return states_dict
-    elif all_states:
-        states_dict = {}
-        for state in us.states.STATES:
-            if not state.is_territory:
-                cities = get_cities_for_state(state, us_cities, min_population)
-                states_dict[state.abbr] = cities
+        logging.debug(f"Processed all states in {time.time() - start_time:.2f} seconds")
         return states_dict
     elif state_input:
         state = get_state_from_input(state_input)
         if not state:
             raise ValueError(f"Invalid state input: {state_input}")
 
-        cities = get_cities_for_state(state, us_cities, min_population)
-
-        # Only display the number of cities found, not the entire list
+        cities = get_cities_for_state(state, us_cities, min_population, num_cities)
+        logging.debug(f"Processed single state {state.abbr} in {time.time() - start_time:.2f} seconds")
         print(f"Number of cities found for {state.name} ({state.abbr}): {len(cities)}")
-
         return {state.abbr: cities}
     else:
-        return get_cities_by_state(all_states=True)
+        logging.debug("No state input or all_states flag, defaulting to all states")
+        return get_cities_by_state(all_states=True, num_cities=num_cities)
 
 def generate_enhanced_query_and_keywords(original_query):
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that generates targeted search queries and keywords for homeowner services using the Google Places API."},
-                {"role": "user", "content": f"For the business type '{original_query}', please provide:\n1. A specific, targeted search query of 3-4 words aimed at improving search results within the bounds of the Places API.\n2. A list of 10 single-word keywords that we can expect to find in the name or title of businesses related to this query. Include words from the original query and extend beyond them. Each keyword must be a single word.\n\nRespond in the following format:\nQuery: [Your 3-4 word query]\nKeywords: [comma-separated list of 10 single-word keywords]"}
+                {"role": "system", "content": "You are a helpful assistant that generates concise and relevant enhanced search queries for residential services."},
+                {"role": "user", "content": f"""Generate a concise enhanced search query for the business type: '{original_query}', focusing on residential services for homeowners. The enhanced query should be 2-3 words long, specific, and targeted to improve search results. Avoid unnecessary adjectives or commercial terms.
+
+Also, provide a list of 10-15 relevant keywords, prioritizing residential-related terms. Include 'exterior' and 'contract' (to cover terms like contracting, contractor) in the keywords.
+
+Respond with the enhanced query on one line, followed by the keywords list on the next line, separated by commas. Example response format:
+Enhanced Query: Residential Roofing
+Keywords: roofing, repair, installation, exterior, contract, shingles, homeowner, residential, ..."""}
             ]
         )
         result = response.choices[0].message.content.strip().split('\n')
@@ -272,7 +279,7 @@ def print_legend():
 
 # Update the display_progress function
 def display_progress(city, result, start_time, completed_cities, total_cities):
-    runtime = datetime.now() - start_time
+    runtime = (datetime.now() - start_time).total_seconds()
     
     if result['status'] == 'Completed':
         data = result['data']
@@ -284,31 +291,25 @@ def display_progress(city, result, start_time, completed_cities, total_cities):
             color = Fore.YELLOW
         else:
             color = Fore.RED
-        print(f"{color}{city:<20} {data['leads']:<8} {data['avg_rating']:.2f}        {data['total_reviews']:<15} {str(runtime):<15} {completed_cities}/{total_cities}")
+        print(f"{color}{city:<20} {data['leads']:<8} {data['invalid_leads']:<15} {data['duplicates']:<10} {runtime:.2f}s{' ':<8} {completed_cities}/{total_cities}")
     elif result['status'] == 'Error':
-        print(f"{Fore.RED}{city:<20} {'ERROR':<8} {'N/A':<12} {'N/A':<15} {str(runtime):<15} {completed_cities}/{total_cities}")
+        print(f"{Fore.RED}{city:<20} {'ERROR':<8} {'N/A':<15} {'N/A':<10} {runtime:.2f}s{' ':<8} {completed_cities}/{total_cities}")
 
     sys.stdout.flush()
 
-def main():
+async def main_async():
     """
     Main function to run the business search and data saving process.
     """
-
-    parser = argparse.ArgumentParser(description="Search for businesses in US states.")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--all-states", action="store_true", help="Search in one major city per all 50 states")
-    group.add_argument("--everything", action="store_true", help="Search in all cities of all states")
-    parser.add_argument("--state", help="Two-letter state abbreviation to search for cities")
-    parser.add_argument("business_type", nargs="?", default="Lighting and Holiday", help="Type of business to search for")
-    args = parser.parse_args()
 
     init(autoreset=True)  # Initialize colorama
     start_time = datetime.now()
 
     # Get cities grouped by state based on arguments
     try:
-        cities_by_state = get_cities_by_state(args.state, args.all_states, args.everything)
+        start_time_cities = time.time()
+        cities_by_state = get_cities_by_state(args.state, args.all_states, args.number)
+        logging.debug(f"Total time to get cities: {time.time() - start_time_cities:.2f} seconds")
     except ValueError as ve:
         logging.error(str(ve))
         sys.exit(1)
@@ -334,83 +335,93 @@ def main():
     # Generate the enhanced query using GPT-4 Mini
     print(f"\n{Style.BRIGHT}{Fore.MAGENTA}Original Search Query: {args.business_type}")
     enhanced_query, keywords = generate_enhanced_query_and_keywords(args.business_type)
+    logging.info(f"Enhanced query: {enhanced_query}")
+    logging.info(f"Keywords: {keywords}")
     print(f"{Style.BRIGHT}{Fore.MAGENTA}Enhanced Search Query: {enhanced_query}")
     print(f"{Style.BRIGHT}{Fore.MAGENTA}Keywords: {', '.join(keywords)}")
 
-    print(f"\n{Style.BRIGHT}{Fore.CYAN}{'City, State':<20} {'Leads':<8} {'Avg Rating':<12} {'Total Reviews':<15} {'Runtime':<15} {'Progress'}")
-    print(f"{Style.BRIGHT}{Fore.CYAN}{'-'*80}")
+    print(f"\n{Style.BRIGHT}{Fore.CYAN}{'City, State':<20} {'Leads':<8} {'Invalid Leads':<15} {'Dups':<10} {'Runtime':<15} {'Progress'}")
+    print(f"{Style.BRIGHT}{Fore.CYAN}{'-'*85}")
 
     all_businesses = []
+    all_bad_leads = []
     businesses_without_numbers = 0
+    total_duplicates = 0
 
     completed_cities = 0
     total_cities = sum(len(cities) for cities in cities_by_state.values())
 
-    # Create a dictionary to store results for each city
-    city_results = {}
-
-    # Optimize ThreadPoolExecutor by increasing max_workers
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        future_to_city = {}
+    async with aiohttp.ClientSession() as session:
+        tasks = []
         for state, cities in cities_by_state.items():
             for city in cities:
-                future = executor.submit(search_businesses, city, args.business_type, enhanced_query)
-                future_to_city[future] = city
-                # Initialize results for each city
-                city_results[city] = {'status': 'Pending', 'data': None}
+                tasks.append(process_city(session, city, args.business_type, enhanced_query, keywords))
 
-        for future in concurrent.futures.as_completed(future_to_city):
-            city = future_to_city[future]
+        for completed_task in asyncio.as_completed(tasks):
             try:
-                businesses, skipped_businesses = future.result()
+                city, businesses, bad_leads, skipped_businesses, invalid_leads, duplicates = await completed_task
                 all_businesses.extend(businesses)
+                all_bad_leads.extend(bad_leads)
+                businesses_without_numbers += skipped_businesses
+                total_duplicates += duplicates
                 completed_cities += 1
 
+                # Calculate averages and display progress
                 businesses_with_numbers = [b for b in businesses if b['PHONE'] != 'N/A']
-                businesses_without_numbers += skipped_businesses
-
                 avg_rating = sum(float(b['RATING']) for b in businesses_with_numbers if b['RATING'] != 'N/A') / len(businesses_with_numbers) if businesses_with_numbers else 0
                 total_reviews = sum(int(b['REVIEWS']) for b in businesses_with_numbers if b['REVIEWS'] != 'N/A')
 
-                city_results[city] = {
+                display_progress(city, {
                     'status': 'Completed',
                     'data': {
                         'leads': len(businesses_with_numbers),
-                        'avg_rating': avg_rating,
-                        'total_reviews': total_reviews
+                        'invalid_leads': invalid_leads,
+                        'duplicates': duplicates
                     }
-                }
-                # Display progress for this city immediately
-                display_progress(city, city_results[city], start_time, completed_cities, total_cities)
-            except Exception as exc:
-                city_results[city] = {'status': 'Error', 'data': str(exc)}
-                # Display error for this city immediately
-                display_progress(city, city_results[city], start_time, completed_cities, total_cities)
+                }, start_time, completed_cities, total_cities)
+            except Exception as e:
+                logging.error(f"Error processing task: {str(e)}")
 
-    # Final display of results
-    display_progress(city_results, start_time, completed_cities, total_cities)
+    print("\nProcessing completed. Preparing final results...")
 
-    # Update the filename to be either 'leads.csv' or 'bad-leads.csv'
-    good_leads_filename = "leads.csv"
-    bad_leads_filename = "bad-leads.csv"
+    # Move the calculation here
+    didnt_match_keywords = sum(1 for lead in all_bad_leads if lead.get('REASON') == "no_keyword")
+    total_duplicates = sum(1 for lead in all_bad_leads if lead.get('REASON') == "duplicate")
+    no_phone_number = sum(1 for lead in all_bad_leads if lead.get('REASON') == "no_number")
 
-    # Separate good leads (with phone numbers) from bad leads (without phone numbers)
-    good_leads = [b for b in all_businesses if b['PHONE'] != 'N/A']
-    bad_leads = [b for b in all_businesses if b['PHONE'] == 'N/A']
+    try:
+        # Update the filename to be either 'leads.csv' or 'bad-leads.csv'
+        good_leads_filename = "leads.csv"
+        bad_leads_filename = "bad-leads.csv"
 
-    # Save good leads
-    save_to_csv(good_leads, good_leads_filename)
+        # Update the saving part
+        print(f"Saving {len(all_businesses)} good leads to {good_leads_filename}...")
+        save_to_csv(all_businesses, good_leads_filename)
+        
+        print(f"Saving {len(all_bad_leads)} bad leads to {bad_leads_filename}...")
+        save_to_csv(all_bad_leads, bad_leads_filename)
 
-    # Save bad leads
-    save_to_csv(bad_leads, bad_leads_filename)
+        total_runtime = datetime.now() - start_time
+        total_leads = len(all_businesses) + len(all_bad_leads)
+        
+        print(f"\n{Style.BRIGHT}{Fore.YELLOW}Total runtime: {total_runtime}")
+        print(f"{Style.BRIGHT}{Fore.YELLOW}Total leads: {total_leads}")
+        print(f"{Style.BRIGHT}{Fore.RED}Total no numbers: {no_phone_number}")
+        print(f"{Style.BRIGHT}{Fore.RED}Total duplicates found: {total_duplicates}")
+        print(f"{Style.BRIGHT}{Fore.RED}Didn't match keywords: {didnt_match_keywords}")
+        print(f"{Style.BRIGHT}{Fore.RED}Total invalid leads: {len(all_bad_leads)}")
+        print(f"{Style.BRIGHT}{Fore.GREEN}Valid leads: {len(all_businesses)}")
+        print(f"{Style.BRIGHT}{Fore.YELLOW}Good leads saved to: {good_leads_filename}")
+        print(f"{Style.BRIGHT}{Fore.YELLOW}Bad leads saved to: {bad_leads_filename}")
 
-    total_runtime = datetime.now() - start_time
-    print(f"\n{Style.BRIGHT}{Fore.YELLOW}Total runtime: {total_runtime}")
-    print(f"{Style.BRIGHT}{Fore.YELLOW}Total businesses: {len(all_businesses)}")
-    print(f"{Style.BRIGHT}{Fore.GREEN}Businesses with phone numbers: {len(good_leads)}")
-    print(f"{Style.BRIGHT}{Fore.RED}Businesses without phone numbers: {len(bad_leads)}")
-    print(f"{Style.BRIGHT}{Fore.YELLOW}Good leads saved to: {good_leads_filename}")
-    print(f"{Style.BRIGHT}{Fore.YELLOW}Bad leads saved to: {bad_leads_filename}")
+        print("\nScript completed successfully.")
+    except Exception as e:
+        print(f"\n{Fore.RED}An error occurred while finalizing results: {str(e)}")
+        logging.exception("Error in finalizing results")
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main_async())
+    except Exception as e:
+        print(f"\n{Fore.RED}An unexpected error occurred: {str(e)}")
+        logging.exception("Unexpected error in main execution")
